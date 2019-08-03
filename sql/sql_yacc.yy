@@ -1885,7 +1885,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
         primary_expr string_factor_expr mysql_concatenation_expr
         select_sublist_qualified_asterisk
         expr_or_default set_expr_or_default
-        geometry_function signed_literal expr_or_literal
+        signed_literal expr_or_literal
         opt_escape
         sp_opt_default
         simple_ident_nospvar
@@ -10277,7 +10277,8 @@ column_default_non_parenthesized_expr:
           }
         | CAST_SYM '(' expr AS cast_type ')'
           {
-            if (unlikely(!($$= $5.create_typecast_item(thd, $3, Lex->charset))))
+            if (unlikely(!($$= $5.create_typecast_item_or_error(thd, $3,
+                                                                Lex->charset))))
               MYSQL_YYABORT;
           }
         | CASE_SYM when_list_opt_else END
@@ -10293,7 +10294,8 @@ column_default_non_parenthesized_expr:
           }
         | CONVERT_SYM '(' expr ',' cast_type ')'
           {
-            if (unlikely(!($$= $5.create_typecast_item(thd, $3, Lex->charset))))
+            if (unlikely(!($$= $5.create_typecast_item_or_error(thd, $3,
+                                                                Lex->charset))))
               MYSQL_YYABORT;
           }
         | CONVERT_SYM '(' expr USING charset_name ')'
@@ -11001,32 +11003,6 @@ function_call_conflict:
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | geometry_function
-          {
-#ifdef HAVE_SPATIAL
-            $$= $1;
-            /* $1 may be NULL, GEOM_NEW not tested for out of memory */
-            if (unlikely($$ == NULL))
-              MYSQL_YYABORT;
-#else
-            my_yyabort_error((ER_FEATURE_DISABLED, MYF(0), sym_group_geom.name,
-                              sym_group_geom.needed_define));
-#endif
-          }
-        ;
-
-geometry_function:
-          CONTAINS_SYM '(' expr ',' expr ')'
-          {
-            $$= GEOM_NEW(thd,
-                         Item_func_spatial_precise_rel(thd, $3, $5,
-                                                 Item_func::SP_CONTAINS_FUNC));
-          }
-        | WITHIN '(' expr ',' expr ')'
-          {
-            $$= GEOM_NEW(thd, Item_func_spatial_precise_rel(thd, $3, $5,
-                                                    Item_func::SP_WITHIN_FUNC));
-          }
         ;
 
 /*
@@ -11110,6 +11086,18 @@ function_call_generic:
             }
 
             if (unlikely(! ($$= item)))
+              MYSQL_YYABORT;
+          }
+        | CONTAINS_SYM '(' opt_expr_list ')'
+          {
+            if (!($$= Lex->make_item_func_call_native_or_parse_error(thd,
+                                                                     $1, $3)))
+              MYSQL_YYABORT;
+          }
+        | WITHIN '(' opt_expr_list ')'
+          {
+            if (!($$= Lex->make_item_func_call_native_or_parse_error(thd,
+                                                                     $1, $3)))
               MYSQL_YYABORT;
           }
         | ident_cli '.' ident_cli '(' opt_expr_list ')'
@@ -11714,6 +11702,14 @@ cast_type:
           }
         | cast_type_numeric  { $$= $1; Lex->charset= NULL; }
         | cast_type_temporal { $$= $1; Lex->charset= NULL; }
+        | IDENT_sys
+          {
+            const Type_handler *h;
+            if (!(h= Type_handler::handler_by_name_or_error($1)))
+              MYSQL_YYABORT;
+            $$.set(h);
+            Lex->charset= NULL;
+          }
         ;
 
 cast_type_numeric:

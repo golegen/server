@@ -89,6 +89,7 @@ class Virtual_column_info;
 class Conv_source;
 class ST_FIELD_INFO;
 class Type_collection;
+class Create_func;
 
 #define my_charset_numeric      my_charset_latin1
 
@@ -3075,6 +3076,7 @@ public:
   }
   const char *ptr() const { return LEX_CSTRING::str; }
   uint length() const { return (uint) LEX_CSTRING::length; }
+  const LEX_CSTRING &lex_cstring() const { return *this; }
   bool eq(const LEX_CSTRING &other) const
   {
     return !my_strnncoll(system_charset_info,
@@ -3312,7 +3314,7 @@ public:
   */
   virtual enum_field_types traditional_merge_field_type() const
   {
-    DBUG_ASSERT(is_traditional_type());
+    DBUG_ASSERT(is_traditional_scalar_type());
     return field_type();
   }
   virtual enum_field_types type_code_for_protocol() const
@@ -3411,13 +3413,10 @@ public:
   }
   virtual ~Type_handler() {}
   /**
-    Determines MariaDB traditional data types that always present
+    Determines MariaDB traditional scalar data types that always present
     in the server.
   */
-  virtual bool is_traditional_type() const
-  {
-    return true;
-  }
+  bool is_traditional_scalar_type() const;
   virtual bool is_scalar_type() const { return true; }
   virtual bool can_return_int() const { return true; }
   virtual bool can_return_decimal() const { return true; }
@@ -3470,7 +3469,8 @@ public:
     This information is not available in the binary log, so
     we assume that these fields are the same on the master and on the slave.
   */
-  virtual Field *make_conversion_table_field(TABLE *TABLE,
+  virtual Field *make_conversion_table_field(MEM_ROOT *root,
+                                             TABLE *table,
                                              uint metadata,
                                              const Field *target) const= 0;
   virtual void show_binlog_type(const Conv_source &src, String *str) const;
@@ -3483,6 +3483,15 @@ public:
   {
     return false;
   }
+  virtual uint Column_definition_gis_options_image(uchar *buff,
+                                                   const Column_definition &def)
+                                                   const
+  {
+    return 0;
+  }
+  virtual bool Column_definition_data_type_info_image(Binary_string *to,
+                                                   const Column_definition &def)
+                                                   const;
   // Check if the implicit default value is Ok in the current sql_mode
   virtual bool validate_implicit_default_value(THD *thd,
                                                const Column_definition &def)
@@ -3555,15 +3564,18 @@ public:
   {
     return true; // Error
   }
-  virtual Field *make_table_field(const LEX_CSTRING *name,
+  virtual Field *make_table_field(MEM_ROOT *root,
+                                  const LEX_CSTRING *name,
                                   const Record_addr &addr,
                                   const Type_all_attributes &attr,
                                   TABLE *table) const= 0;
-  Field *make_and_init_table_field(const LEX_CSTRING *name,
+  Field *make_and_init_table_field(MEM_ROOT *root,
+                                   const LEX_CSTRING *name,
                                    const Record_addr &addr,
                                    const Type_all_attributes &attr,
                                    TABLE *table) const;
-  virtual Field *make_schema_field(TABLE *table,
+  virtual Field *make_schema_field(MEM_ROOT *root,
+                                   TABLE *table,
                                    const Record_addr &addr,
                                    const ST_FIELD_INFO &def,
                                    bool show_field) const
@@ -3716,7 +3728,6 @@ public:
   virtual Item *create_typecast_item(THD *thd, Item *item,
                                      const Type_cast_attributes &attr) const
   {
-    DBUG_ASSERT(0);
     return NULL;
   }
   virtual Item_copy *create_item_copy(THD *thd, Item *item) const;
@@ -3885,6 +3896,7 @@ public:
     DBUG_ASSERT(0);
     return true;
   }
+  const Type_collection *type_collection() const override;
   bool is_scalar_type() const { return false; }
   bool can_return_int() const { return false; }
   bool can_return_decimal() const { return false; }
@@ -3933,7 +3945,8 @@ public:
     DBUG_ASSERT(0);
     return NULL;
   }
-  Field *make_conversion_table_field(TABLE *TABLE,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table,
                                      uint metadata,
                                      const Field *target) const
   {
@@ -3970,7 +3983,8 @@ public:
   {
     return false;
   }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const
@@ -4375,7 +4389,8 @@ public:
   }
   bool subquery_type_allows_materialization(const Item *inner,
                                             const Item *outer) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -4961,18 +4976,21 @@ public:
   {
     return Item_send_tiny(item, protocol, buf);
   }
-  Field *make_conversion_table_field(TABLE *TABLE, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_TINY); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5012,18 +5030,21 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const
   { return 6; }
   uint32 calc_pack_length(uint32 length) const { return 2; }
-  Field *make_conversion_table_field(TABLE *TABLE, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_SHORT); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5063,18 +5084,21 @@ public:
   {
     return Item_send_long(item, protocol, buf);
   }
-  Field *make_conversion_table_field(TABLE *TABLE, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_LONG); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5127,7 +5151,8 @@ public:
   {
     return Item_send_longlong(item, protocol, buf);
   }
-  Field *make_conversion_table_field(TABLE *TABLE, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
@@ -5136,11 +5161,13 @@ public:
   {
     return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_LONGLONG);
   }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5160,7 +5187,8 @@ class Type_handler_vers_trx_id: public Type_handler_longlong
 {
 public:
   virtual ~Type_handler_vers_trx_id() {}
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5191,14 +5219,16 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const
   { return 9; }
   uint32 calc_pack_length(uint32 length) const { return 3; }
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *mem_root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_INT24); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5231,7 +5261,8 @@ public:
   {
     return Item_send_short(item, protocol, buf);
   }
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   void Column_definition_reuse_fix_attributes(THD *thd,
@@ -5241,7 +5272,8 @@ public:
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_YEAR); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5286,7 +5318,8 @@ public:
     return print_item_value_csstr(thd, item, str);
   }
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage1(THD *thd,
@@ -5302,7 +5335,8 @@ public:
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5340,18 +5374,21 @@ public:
     return Item_send_float(item, protocol, buf);
   }
   Field *make_num_distinct_aggregator_field(MEM_ROOT *, const Item *) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_real(c, MYSQL_TYPE_FLOAT); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5394,18 +5431,21 @@ public:
   {
     return Item_send_double(item, protocol, buf);
   }
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_real(c, MYSQL_TYPE_DOUBLE); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5446,7 +5486,8 @@ public:
   {
     return MYSQL_TIMESTAMP_TIME;
   }
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5526,13 +5567,15 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const
   { return MIN_TIME_WIDTH; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_TIME); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5554,13 +5597,15 @@ public:
   enum_field_types real_field_type() const { return MYSQL_TYPE_TIME2; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_TIME2); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5625,7 +5670,8 @@ public:
   {
     return true;
   }
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5658,13 +5704,15 @@ class Type_handler_date: public Type_handler_date_common
 public:
   virtual ~Type_handler_date() {}
   uint32 calc_pack_length(uint32 length) const { return 4; }
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_DATE); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5684,13 +5732,15 @@ public:
   virtual ~Type_handler_newdate() {}
   enum_field_types real_field_type() const { return MYSQL_TYPE_NEWDATE; }
   uint32 calc_pack_length(uint32 length) const { return 3; }
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_NEWDATE); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5729,7 +5779,8 @@ public:
   {
     return true;
   }
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -5780,13 +5831,15 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const
   { return MAX_DATETIME_WIDTH; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_DATETIME); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5808,13 +5861,15 @@ public:
   enum_field_types real_field_type() const { return MYSQL_TYPE_DATETIME2; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_DATETIME2); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5918,13 +5973,15 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const
   { return MAX_DATETIME_WIDTH; }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_TIMESTAMP); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5946,7 +6003,8 @@ public:
   enum_field_types real_field_type() const { return MYSQL_TYPE_TIMESTAMP2; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
@@ -5954,7 +6012,8 @@ public:
   {
     return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_TIMESTAMP2);
   }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -5980,14 +6039,16 @@ public:
   const Type_handler *type_handler_for_tmp_table(const Item *item) const;
   const Type_handler *type_handler_for_union(const Item *item) const;
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy_num(c, MYSQL_TYPE_DECIMAL); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6011,7 +6072,8 @@ public:
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage1(THD *thd,
@@ -6027,7 +6089,8 @@ public:
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6062,7 +6125,8 @@ public:
                      bool binary_cmp) const;
   bool Item_save_in_value(THD *thd, Item *item, st_value *value) const;
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage1(THD *thd,
@@ -6079,7 +6143,8 @@ public:
                                         handler *file,
                                         ulonglong table_flags) const
   { return Column_definition_prepare_stage2_legacy(c, MYSQL_TYPE_NULL); }
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6118,7 +6183,8 @@ public:
     return varstring_type_handler(item);
   }
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
@@ -6126,7 +6192,8 @@ public:
                                         ulonglong table_flags) const;
   bool Key_part_spec_init_ft(Key_part_spec *part,
                              const Column_definition &def) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6198,7 +6265,8 @@ public:
   }
   bool is_param_long_data_type() const { return true; }
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
@@ -6206,11 +6274,13 @@ public:
                                         ulonglong table_flags) const;
   bool Key_part_spec_init_ft(Key_part_spec *part,
                              const Column_definition &def) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -6245,7 +6315,8 @@ public:
   }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   enum_dynamic_column_type dyncol_type(const Type_all_attributes *attr) const
   {
@@ -6260,7 +6331,8 @@ class Type_handler_blob_common: public Type_handler_longstr
 public:
   virtual ~Type_handler_blob_common() { }
   virtual uint length_bytes() const= 0;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const override;
   const Type_handler *type_handler_for_tmp_table(const Item *item) const
     override
@@ -6308,7 +6380,8 @@ public:
     override;
   void Item_param_setup_conversion(THD *thd, Item_param *) const override;
 
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const override;
@@ -6332,7 +6405,8 @@ public:
   enum_field_types field_type() const { return MYSQL_TYPE_TINY_BLOB; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6350,7 +6424,8 @@ public:
   enum_field_types field_type() const { return MYSQL_TYPE_MEDIUM_BLOB; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6370,7 +6445,8 @@ public:
   uint32 calc_pack_length(uint32 length) const;
   Item *create_typecast_item(THD *thd, Item *item,
                              const Type_cast_attributes &attr) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6388,7 +6464,8 @@ public:
   enum_field_types field_type() const { return MYSQL_TYPE_BLOB; }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6405,7 +6482,8 @@ public:
   }
   uint32 max_display_length_for_field(const Conv_source &src) const;
   void show_binlog_type(const Conv_source &src, String *str) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   enum_dynamic_column_type dyncol_type(const Type_all_attributes *attr) const
   {
@@ -6459,13 +6537,15 @@ public:
     return MYSQL_TYPE_ENUM;
   }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6476,7 +6556,8 @@ public:
                                    const Bit_addr &bit,
                                    const Column_definition_attributes *attr,
                                    uint32 flags) const;
-  Field *make_schema_field(TABLE *table,
+  Field *make_schema_field(MEM_ROOT *root,
+                           TABLE *table,
                            const Record_addr &addr,
                            const ST_FIELD_INFO &def,
                            bool show_field) const;
@@ -6495,13 +6576,15 @@ public:
     return MYSQL_TYPE_SET;
   }
   uint32 calc_pack_length(uint32 length) const;
-  Field *make_conversion_table_field(TABLE *, uint metadata,
+  Field *make_conversion_table_field(MEM_ROOT *root,
+                                     TABLE *table, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
   bool Column_definition_prepare_stage2(Column_definition *c,
                                         handler *file,
                                         ulonglong table_flags) const;
-  Field *make_table_field(const LEX_CSTRING *name,
+  Field *make_table_field(MEM_ROOT *root,
+                          const LEX_CSTRING *name,
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
@@ -6521,6 +6604,18 @@ class Type_handler_interval_DDhhmmssff: public Type_handler_long_blob
 public:
   Item *create_typecast_item(THD *thd, Item *item,
                              const Type_cast_attributes &attr) const;
+};
+
+
+class Function_collection
+{
+public:
+  virtual ~Function_collection() {}
+  virtual bool init()= 0;
+  virtual void cleanup()= 0;
+  virtual Create_func *find_native_function_builder(THD *thd,
+                                                    const LEX_CSTRING &name)
+                                                    const= 0;
 };
 
 

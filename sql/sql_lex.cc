@@ -3229,7 +3229,7 @@ void Query_tables_list::destroy_query_tables_list()
 */
 
 LEX::LEX()
-  : explain(NULL), result(0), arena_for_set_stmt(0), mem_root_for_set_stmt(0),
+  : explain(NULL), result(0), part_info(NULL), arena_for_set_stmt(0), mem_root_for_set_stmt(0),
     option_type(OPT_DEFAULT), context_analysis_only(0), sphead(0),
     default_used(0), is_lex_started(0), limit_rows_examined_cnt(ULONGLONG_MAX)
 {
@@ -8609,6 +8609,20 @@ Item *LEX::make_item_func_call_generic(THD *thd, Lex_ident_cli_st *cdb,
 }
 
 
+Item *LEX::make_item_func_call_native_or_parse_error(THD *thd,
+                                                     Lex_ident_cli_st &name,
+                                                     List<Item> *args)
+{
+  Create_func *builder= find_native_function_builder(thd, &name);
+  DBUG_EXECUTE_IF("make_item_func_call_native_simulate_not_found",
+                  builder= NULL;);
+  if (builder)
+    return builder->create_func(thd, &name, args);
+  thd->parse_error(ER_SYNTAX_ERROR, name.end());
+  return NULL;
+}
+
+
 Item *LEX::create_item_qualified_asterisk(THD *thd,
                                           const Lex_ident_sys_st *name)
 {
@@ -10449,4 +10463,22 @@ Spvar_definition *LEX::row_field_name(THD *thd, const Lex_ident_sys_st &name)
     return NULL;
   init_last_field(res, &name, thd->variables.collation_database);
   return res;
+}
+
+
+Item *
+Lex_cast_type_st::create_typecast_item_or_error(THD *thd, Item *item,
+                                                CHARSET_INFO *cs) const
+{
+  Item *tmp= create_typecast_item(thd, item, cs);
+  if (!tmp)
+  {
+    Name name= m_type_handler->name();
+    char buf[128];
+    size_t length= my_snprintf(buf, sizeof(buf), "CAST(expr AS %.*s)",
+                               (int) name.length(), name.ptr());
+    my_error(ER_UNKNOWN_OPERATOR, MYF(0),
+             ErrConvString(buf, length, system_charset_info).ptr());
+  }
+  return tmp;
 }

@@ -15,11 +15,13 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
 
-#include "sql_type_geom.h"
-#include "sql_class.h"
-#include "item.h"
+#include "mariadb.h"
 
 #ifdef HAVE_SPATIAL
+
+#include "sql_class.h"
+#include "sql_type_geom.h"
+#include "item_geofunc.h"
 
 const Name
   Type_handler_geometry::
@@ -203,7 +205,8 @@ const Type_handler *Type_handler_geometry::type_handler_for_comparison() const
 }
 
 
-Field *Type_handler_geometry::make_conversion_table_field(TABLE *table,
+Field *Type_handler_geometry::make_conversion_table_field(MEM_ROOT *root,
+                                                          TABLE *table,
                                                           uint metadata,
                                                           const Field *target)
                                                           const
@@ -216,7 +219,7 @@ Field *Type_handler_geometry::make_conversion_table_field(TABLE *table,
     The statistics was already incremented when "target" was created.
   */
   const Field_geom *fg= static_cast<const Field_geom*>(target);
-  return new(table->in_use->mem_root)
+  return new (root)
          Field_geom(NULL, (uchar *) "", 1, Field::NONE, &empty_clex_str,
                     table->s, 4, fg->type_handler_geom(), fg->srid);
 }
@@ -315,6 +318,18 @@ bool Type_handler_geometry::Key_part_spec_init_spatial(Key_part_spec *part,
   return false;
 }
 
+
+Item *
+Type_handler_geometry::create_typecast_item(THD *thd, Item *item,
+                                           const Type_cast_attributes &attr)
+                                           const
+{
+  DBUG_EXECUTE_IF("emulate_geometry_create_typecast_item",
+    return new (thd->mem_root) Item_func_geometry_from_text(thd, item);
+  );
+
+  return NULL;
+}
 
 bool Type_handler_point::Key_part_spec_init_primary(Key_part_spec *part,
                                               const Column_definition &def,
@@ -426,12 +441,13 @@ uint32 Type_handler_geometry::calc_pack_length(uint32 length) const
 }
 
 
-Field *Type_handler_geometry::make_table_field(const LEX_CSTRING *name,
+Field *Type_handler_geometry::make_table_field(MEM_ROOT *root,
+                                               const LEX_CSTRING *name,
                                                const Record_addr &addr,
                                                const Type_all_attributes &attr,
                                                TABLE *table) const
 {
-  return new (table->in_use->mem_root)
+  return new (root)
          Field_geom(addr.ptr(), addr.null_ptr(), addr.null_bit(),
                     Field::NONE, name, table->s, 4, this, 0);
 }
@@ -595,14 +611,14 @@ void Type_handler_geometry::Item_param_set_param_func(Item_param *param,
 
 
 Field *Type_handler_geometry::
-  make_table_field_from_def(TABLE_SHARE *share, MEM_ROOT *mem_root,
+  make_table_field_from_def(TABLE_SHARE *share, MEM_ROOT *root,
                             const LEX_CSTRING *name,
                             const Record_addr &rec, const Bit_addr &bit,
                             const Column_definition_attributes *attr,
                             uint32 flags) const
 {
   status_var_increment(current_thd->status_var.feature_gis);
-  return new (mem_root)
+  return new (root)
     Field_geom(rec.ptr(), rec.null_ptr(), rec.null_bit(),
                attr->unireg_check, name, share,
                attr->pack_flag_to_pack_length(), this, attr->srid);
@@ -616,6 +632,97 @@ void Type_handler_geometry::
   def->frm_pack_basic(buff);
   buff[11]= 0;
   buff[14]= (uchar) geometry_type();
+}
+
+
+
+/* Values 1-40 reserved for 1-byte options,
+   41-80 for 2-byte options,
+   81-120 for 4-byte options,
+   121-160 for 8-byte options,
+   other - varied length in next 1-3 bytes.
+*/
+enum extra2_gis_field_options {
+  FIELDGEOM_END=0,
+  FIELDGEOM_STORAGE_MODEL=1,
+  FIELDGEOM_PRECISION=2,
+  FIELDGEOM_SCALE=3,
+  FIELDGEOM_SRID=81,
+};
+
+
+uint
+Type_handler_geometry::
+  Column_definition_gis_options_image(uchar *cbuf,
+                                      const Column_definition &def) const
+{
+  if (cbuf)
+  {
+    cbuf[0]= FIELDGEOM_STORAGE_MODEL;
+    cbuf[1]= (uchar) Field_geom::GEOM_STORAGE_WKB;
+
+    cbuf[2]= FIELDGEOM_PRECISION;
+    cbuf[3]= (uchar) def.length;
+
+    cbuf[4]= FIELDGEOM_SCALE;
+    cbuf[5]= (uchar) def.decimals;
+
+    cbuf[6]= FIELDGEOM_SRID;
+    int4store(cbuf + 7, ((uint32) def.srid));
+
+    cbuf[11]= FIELDGEOM_END;
+  }
+  return 12;
+}
+
+
+static uint gis_field_options_read(const uchar *buf, size_t buf_len,
+                                   Field_geom::storage_type *st_type,
+                                   uint *precision, uint *scale, uint *srid)
+{
+  const uchar *buf_end= buf + buf_len;
+  const uchar *cbuf= buf;
+  int option_id;
+
+  *precision= *scale= *srid= 0;
+  *st_type= Field_geom::GEOM_STORAGE_WKB;
+
+  if (!buf)  /* can only happen with the old FRM file */
+    goto end_of_record;
+
+  while (cbuf < buf_end)
+  {
+    switch ((option_id= *(cbuf++)))
+    {
+    case FIELDGEOM_STORAGE_MODEL:
+      *st_type= (Field_geom::storage_type) cbuf[0];
+      break;
+    case FIELDGEOM_PRECISION:
+      *precision= cbuf[0];
+      break;
+    case FIELDGEOM_SCALE:
+      *scale= cbuf[0];
+      break;
+    case FIELDGEOM_SRID:
+      *srid= uint4korr(cbuf);
+      break;
+    case FIELDGEOM_END:
+      goto end_of_record;
+    }
+    if (option_id > 0 && option_id <= 40)
+      cbuf+= 1;
+    else if (option_id > 40 && option_id <= 80)
+      cbuf+= 2;
+    else if (option_id > 80 && option_id <= 120)
+      cbuf+= 4;
+    else if (option_id > 120 && option_id <= 160)
+      cbuf+= 8;
+    else /* > 160 and <=255 */
+      cbuf+= cbuf[0] ? 1 + cbuf[0] : 3 + uint2korr(cbuf+1);
+  }
+
+end_of_record:
+  return (uint)(cbuf - buf);
 }
 
 
@@ -657,5 +764,152 @@ Field_geom::rpl_conv_type_from(const Conv_source &source,
          CONV_TYPE_IMPOSSIBLE;
 }
 
+
+/*****************************************************************/
+void Field_geom::sql_type(String &res) const
+{
+  CHARSET_INFO *cs= &my_charset_latin1;
+  const Name tmp= m_type_handler->name();
+  res.set(tmp.ptr(), tmp.length(), cs);
+}
+
+
+int Field_geom::store(double nr)
+{
+  my_message(ER_CANT_CREATE_GEOMETRY_OBJECT,
+             ER_THD(get_thd(), ER_CANT_CREATE_GEOMETRY_OBJECT), MYF(0));
+  return -1;
+}
+
+
+int Field_geom::store(longlong nr, bool unsigned_val)
+{
+  my_message(ER_CANT_CREATE_GEOMETRY_OBJECT,
+             ER_THD(get_thd(), ER_CANT_CREATE_GEOMETRY_OBJECT), MYF(0));
+  return -1;
+}
+
+
+int Field_geom::store_decimal(const my_decimal *)
+{
+  my_message(ER_CANT_CREATE_GEOMETRY_OBJECT,
+             ER_THD(get_thd(), ER_CANT_CREATE_GEOMETRY_OBJECT), MYF(0));
+  return -1;
+}
+
+
+int Field_geom::store(const char *from, size_t length, CHARSET_INFO *cs)
+{
+  if (!length)
+    bzero(ptr, Field_blob::pack_length());
+  else
+  {
+    if (from == Geometry::bad_geometry_data.ptr())
+      goto err;
+    // Check given WKB
+    uint32 wkb_type;
+    if (length < SRID_SIZE + WKB_HEADER_SIZE + 4)
+      goto err;
+    wkb_type= uint4korr(from + SRID_SIZE + 1);
+    if (wkb_type < (uint32) Geometry::wkb_point ||
+	wkb_type > (uint32) Geometry::wkb_last)
+      goto err;
+
+    if (m_type_handler->geometry_type() != Type_handler_geometry::GEOM_GEOMETRY &&
+        m_type_handler->geometry_type() != Type_handler_geometry::GEOM_GEOMETRYCOLLECTION &&
+        (uint32) m_type_handler->geometry_type() != wkb_type)
+    {
+      const char *db= table->s->db.str;
+      const char *tab_name= table->s->table_name.str;
+
+      if (!db)
+        db= "";
+      if (!tab_name)
+        tab_name= "";
+
+      my_error(ER_TRUNCATED_WRONG_VALUE_FOR_FIELD, MYF(0),
+               Geometry::ci_collection[m_type_handler->geometry_type()]->m_name.str,
+               Geometry::ci_collection[wkb_type]->m_name.str,
+               db, tab_name, field_name.str,
+               (ulong) table->in_use->get_stmt_da()->
+               current_row_for_warning());
+      goto err_exit;
+    }
+
+    Field_blob::store_length(length);
+    if ((table->copy_blobs || length <= MAX_FIELD_WIDTH) &&
+        from != value.ptr())
+    {						// Must make a copy
+      value.copy(from, length, cs);
+      from= value.ptr();
+    }
+    bmove(ptr + packlength, &from, sizeof(char*));
+  }
+  return 0;
+
+err:
+  my_message(ER_CANT_CREATE_GEOMETRY_OBJECT,
+             ER_THD(get_thd(), ER_CANT_CREATE_GEOMETRY_OBJECT), MYF(0));
+err_exit:
+  bzero(ptr, Field_blob::pack_length());
+  return -1;
+}
+
+
+bool Field_geom::is_equal(const Column_definition &new_field) const
+{
+  /*
+    - Allow ALTER..INPLACE to supertype (GEOMETRY),
+      e.g. POINT to GEOMETRY or POLYGON to GEOMETRY.
+    - Allow ALTER..INPLACE to the same geometry type: POINT -> POINT
+  */
+  if (new_field.type_handler() == m_type_handler)
+    return true;
+  const Type_handler_geometry *gth=
+    dynamic_cast<const Type_handler_geometry*>(new_field.type_handler());
+  return gth && gth->is_binary_compatible_geom_super_type_for(m_type_handler);
+}
+
+
+bool Field_geom::can_optimize_range(const Item_bool_func *cond,
+                                    const Item *item,
+                                    bool is_eq_func) const
+{
+  return item->cmp_type() == STRING_RESULT;
+}
+
+
+bool Field_geom::load_data_set_no_data(THD *thd, bool fixed_format)
+{
+  return Field_geom::load_data_set_null(thd);
+}
+
+
+bool Field_geom::load_data_set_null(THD *thd)
+{
+  Field_blob::reset();
+  if (!maybe_null())
+  {
+    my_error(ER_WARN_NULL_TO_NOTNULL, MYF(0), field_name.str,
+             thd->get_stmt_da()->current_row_for_warning());
+    return true;
+  }
+  set_null();
+  set_has_explicit_value(); // Do not auto-update this field
+  return false;
+}
+
+
+uint Field_geom::get_key_image(uchar *buff,uint length, imagetype type_arg)
+{
+  if (type_arg == itMBR)
+  {
+    LEX_CSTRING tmp;
+    tmp.str= (const char *) get_ptr();
+    tmp.length= get_length(ptr);
+    return Geometry::get_key_image_itMBR(tmp, buff, length);
+  }
+  return Field_blob::get_key_image_itRAW(buff, length);
+}
 
 #endif // HAVE_SPATIAL
